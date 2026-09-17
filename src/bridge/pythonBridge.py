@@ -88,6 +88,8 @@ def get_session(session_key, kernel_name, cwd):
     with sessions_lock:
         existing = sessions.get(session_key)
         if existing and existing["kernel_name"].lower() == kernel_name.lower():
+            if existing.get("cwd") != os.path.realpath(cwd):
+                raise ValueError("Startup directory changed. Restart the notebook kernel.")
             return existing
 
     if existing:
@@ -111,6 +113,7 @@ def get_session(session_key, kernel_name, cwd):
         "manager": manager,
         "client": client,
         "kernel_name": kernel_name,
+        "cwd": os.path.realpath(cwd),
         "lock": threading.Lock(),
     }
     with sessions_lock:
@@ -264,7 +267,11 @@ def handle(request):
         if not session:
             return {"restarted": False}
         with session["lock"]:
-            session["manager"].restart_kernel(now=True)
+            cwd = os.path.realpath(request.get("cwd") or session["cwd"])
+            if not os.path.isdir(cwd):
+                raise ValueError("Notebook startup directory is unavailable")
+            session["manager"].restart_kernel(now=True, cwd=cwd)
+            session["cwd"] = cwd
             session["client"].wait_for_ready(timeout=20)
         return {"restarted": True}
     if operation == "shutdown":

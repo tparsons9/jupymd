@@ -83,8 +83,8 @@ export class JupyterBridgeClient {
 		return result.interrupted;
 	}
 
-	async restart(sessionKey: string): Promise<boolean> {
-		const result = await this.request<{restarted: boolean}>("restart", {sessionKey}, 30000);
+	async restart(sessionKey: string, cwd?: string): Promise<boolean> {
+		const result = await this.request<{restarted: boolean}>("restart", {sessionKey, cwd}, 30000);
 		return result.restarted;
 	}
 

@@ -1,6 +1,7 @@
 import {strict as assert} from 'node:assert';
 import {beforeEach, afterEach, describe, it} from 'mocha';
 import {EOL} from 'node:os';
+import {realpath} from 'node:fs/promises';
 import {JupyterBridgeClient} from '../../src/bridge/JupyterBridgeClient';
 import {workspace, testPython, installKernel, join, readFile, rm, preserveFailure} from '../support/environment';
 import type {KernelExecutionResult} from '../../src/kernels/types';
@@ -100,4 +101,24 @@ describe('Real Jupyter bridge', function () {
         assert.equal(text(await execute("print('isolated' in globals())",'two')),'False\n');
         await bridge.shutdown('one'); await bridge.shutdown('two');
     });
+});
+
+describe('Repository startup directories', function () {
+ let directory: string, bridge: JupyterBridgeClient, kernel: string;
+ beforeEach(async () => { directory = await workspace(); kernel = await installKernel(join(directory, 'jupyter')); bridge = new JupyterBridgeClient(testPython('tooling'), join(directory, 'jupyter')); });
+ afterEach(async () => { await bridge?.dispose(); if (directory) await rm(directory, {recursive: true, force: true}); });
+ it('retains independent notebook state and restores the configured directory on restart', async () => {
+  await bridge.execute('first', kernel, directory, 'value = 41\nimport os\nos.chdir("/")');
+  await bridge.execute('second', kernel, directory, 'value = 12');
+  assert.equal(text(await bridge.execute('first', kernel, directory, 'print(value + 1)\nprint(os.getcwd())')), '42\n/\n');
+  assert.equal(text(await bridge.execute('second', kernel, directory, 'print(value)')), '12\n');
+  await bridge.restart('first', directory);
+  assert.equal(text(await bridge.execute('first', kernel, directory, 'import os\nprint(os.getcwd())')).trim(), await realpath(directory));
+ });
+ it('rejects reuse with a changed startup directory until explicit restart', async () => {
+  await bridge.execute('note', kernel, directory, 'x = 1');
+  await assert.rejects(bridge.execute('note', kernel, '/', 'print(x)'), /Restart/);
+  await bridge.restart('note', '/');
+  assert.equal(text(await bridge.execute('note', kernel, '/', 'import os\nprint(os.getcwd())')).trim(), '/');
+ });
 });

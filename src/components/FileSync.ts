@@ -58,58 +58,26 @@ class NotebookFileSelectorModal extends FuzzySuggestModal<TFile> {
 	}
 }
 
+import {NotebookOperations} from "../notebook/NotebookOperations";
+
 export class FileSync {
 	private readonly pythonPath: string;
-	private lastSyncTime = 0;
-	private syncDebounceTimeout: number | null = null;
-	private readonly SYNC_DEADTIME_MS = 1500;
-	private readonly DEBOUNCE_DELAY_MS = 500;
-
-	constructor(private app: App, pythonPath: string) {
-		this.pythonPath = pythonPath;
-	}
-
-	public isSyncBlocked(): boolean {
-		const now = Date.now();
-		const inDeadtime = now - this.lastSyncTime < this.SYNC_DEADTIME_MS;
-		const inDebounce = this.syncDebounceTimeout !== null;
-		return inDeadtime || inDebounce;
-	}
-
-	public async handleSync(file?: TFile, verbose?: boolean): Promise<void> {
-		const targetFile = file ?? this.app.workspace.getActiveFile();
-		if (!targetFile) return;
-
-		if (this.isSyncBlocked()) {
-			return;
-		}
-
-		if (this.syncDebounceTimeout) {
-			window.clearTimeout(this.syncDebounceTimeout);
-		}
-
-		this.syncDebounceTimeout = window.setTimeout(() => {
-			this.syncDebounceTimeout = null;
-
-			if (!this.isSyncBlocked()) {
-				void this.performSync(targetFile);
-			}
-		}, this.DEBOUNCE_DELAY_MS);
-
-		if (verbose) {
-			new Notice("Syncing...")
-		}
-	}
-
-	private async performSync(file: TFile): Promise<void> {
-		try {
-			this.lastSyncTime = Date.now();
-			await this.syncFiles(file);
-		} catch (error) {
-			console.error("Sync failed:", error);
-			this.lastSyncTime = 0;
-		}
-	}
+ private timers = new Map<string, number>();
+ private disposed = false;
+ private synchronized = new Map<string, string>();
+ constructor(private app: App, pythonPath: string, private bidirectional: () => boolean = () => false, private operations = new NotebookOperations()) { this.pythonPath = pythonPath; }
+ public isSyncBlocked(): boolean { return this.timers.size > 0; }
+ public async handleSync(file?: TFile, verbose?: boolean): Promise<void> {
+  const target = file ?? this.app.workspace.getActiveFile(); if (!target || this.disposed) return;
+  if (target.extension && target.extension !== 'md' && !(target.extension === 'ipynb' && this.bidirectional())) return;
+  const previous = this.timers.get(target.path); if (previous) window.clearTimeout(previous);
+  this.timers.set(target.path, window.setTimeout(() => {
+   this.timers.delete(target.path);
+   if (!this.disposed) void this.syncFiles(target).catch(error => console.error('Notebook sync failed:', error));
+  }, 500));
+  if (verbose) new Notice('Syncing…');
+ }
+ dispose(): void { this.disposed = true; for (const timer of this.timers.values()) window.clearTimeout(timer); this.timers.clear(); this.synchronized.clear(); }
 
 	async convertNotebookToNote(): Promise<void> {
 		const notebooks = this.app.vault.getFiles().filter((file) => file.path.endsWith(".ipynb"));
@@ -147,8 +115,8 @@ export class FileSync {
 		}
 	}
 
-	async createNotebook(kernel: KernelConnection, refreshView = true): Promise<boolean> {
-		const activeFile = this.app.workspace.getActiveFile();
+	async createNotebook(kernel: KernelConnection, refreshView = true, targetFile?: TFile): Promise<boolean> {
+		const activeFile = targetFile ?? this.app.workspace.getActiveFile();
 		if (!activeFile) {
 			new Notice("No active note found.");
 			return false;
@@ -164,7 +132,7 @@ export class FileSync {
 
 		try {
 			if (fs.existsSync(ipynbPath)) {
-				fs.unlinkSync(ipynbPath)
+				throw new Error("A notebook already exists at this location; it will not be overwritten.")
 			}
 
 			await runJupytext(this.pythonPath, ["--to", "notebook", mdPath]);
@@ -226,18 +194,20 @@ export class FileSync {
 		});
 	}
 
-	async syncFiles(file: TFile): Promise<void> {
-		if (!(await isNotebookPaired(this.app, file))) return;
-
-		const filePath = getAbsolutePath(file);
-		const ipynbPath = filePath.replace(/\.md$/, ".ipynb");
-
-		try {
-			// `--sync` updates the paired notebook from markdown changes while preserving
-			// existing notebook outputs instead of recreating the .ipynb from scratch.
-			await runJupytext(this.pythonPath, ["--sync", ipynbPath]);
-		} catch (error: unknown) {
-			console.error(`Failed to sync Markdown file: ${getErrorMessage(error)}`);
-		}
-	}
+ async syncFiles(file: TFile): Promise<void> {
+  const filePath = getAbsolutePath(file);
+  const notePath = filePath.replace(/\.ipynb$/, '.md');
+  await this.operations.run(notePath, async () => {
+   if (this.disposed) return;
+   if (file.extension === 'ipynb') {
+    if (this.bidirectional()) await runJupytext(this.pythonPath, ['--sync', filePath]);
+    return;
+   }
+   if (!(await isNotebookPaired(this.app, file))) return;
+   const source = await fs.promises.readFile(filePath, 'utf8');
+   if (this.synchronized.get(filePath) === source) return;
+   await runJupytext(this.pythonPath, this.bidirectional() ? ['--sync', filePath] : ['--update', '--to', 'ipynb', filePath]);
+   this.synchronized.set(filePath, source);
+  });
+ }
 }

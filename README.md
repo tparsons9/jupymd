@@ -116,3 +116,9 @@ JupyMD does not include telemetry and does not make its own network requests. If
 This is a personal fork tailored to one workflow and isn't set up to take outside contributions; see [CONTRIBUTING.md](CONTRIBUTING.md) for how it's maintained. To contribute to JupyMD itself, please use the [upstream repository](https://github.com/d-eniz/jupymd) and its [contribution guidelines](https://github.com/d-eniz/jupymd/blob/master/CONTRIBUTING.md).
 
 JupyMD is an independent project and not affiliated with Project Jupyter, Jupytext, or Obsidian.
+
+## Notebook integration API (fork addition)
+
+`plugin.api.apiVersion === 1` exposes explicitly targeted notebook operations to companion plugins. See [Notebook API](docs/notebook-api.md). Copilot Codeblocks uses this API to supply a repository startup directory and manage notebook execution. Kernels remain isolated per notebook and survive tab switches; unloading JupyMD shuts them down.
+
+Synchronization is queued per notebook. Unidirectional synchronization keeps Markdown authoritative and preserves existing outputs; enabling bidirectional sync opts back into Jupytext timestamp selection. Background sync and execution share a per-notebook mutation queue.

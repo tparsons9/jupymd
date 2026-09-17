@@ -17,6 +17,7 @@ import * as fs from "fs/promises";
 
 export class CodeExecutor {
 	private currentNotePath: string | null = null;
+ private notebookQueues = new Map<string, Promise<void>>();
 
 	constructor(
 		private plugin: JupyMDPlugin,
@@ -102,9 +103,6 @@ export class CodeExecutor {
 	}
 
 	private async prepareExecutionContext(notePath: string): Promise<void> {
-		if (this.currentNotePath && this.currentNotePath !== notePath) {
-			await this.kernelService.shutdown(this.currentNotePath).catch(() => undefined);
-		}
 		this.currentNotePath = notePath;
 	}
 
@@ -236,12 +234,20 @@ export class CodeExecutor {
 		});
 	}
 
-	async runCodeBlocksAndUpdateNotebook({codeBlocks, ipynbPath, notePath}: {
+ async runCodeBlocksAndUpdateNotebook(args: {codeBlocks: CodeBlock[]; ipynbPath: string; notePath: string}, alreadyLocked = false) {
+  if (alreadyLocked) return this.runBatch(args);
+  if (this.plugin.operations) return this.plugin.operations.run(args.notePath, () => this.runBatch(args));
+  const operation = (this.notebookQueues.get(args.notePath) || Promise.resolve()).catch(() => {}).then(() => this.runBatch(args));
+  this.notebookQueues.set(args.notePath, operation);
+  try { await operation; } finally { if (this.notebookQueues.get(args.notePath) === operation) this.notebookQueues.delete(args.notePath); }
+ }
+ private async runBatch({codeBlocks, ipynbPath, notePath}: {
 		codeBlocks: CodeBlock[];
 		ipynbPath: string;
 		notePath: string;
 	}) {
 		if (codeBlocks.length === 0) return;
+  const initialSource = await fs.readFile(notePath, "utf-8");
 
 		try {
 			const readNotebook = async () => {
@@ -287,7 +293,7 @@ export class CodeExecutor {
 				await fs.writeFile(ipynbPath, JSON.stringify(notebook, null, 2));
 			}
 
-			await runJupytext(this.plugin.settings.toolingPython, ["--sync", ipynbPath]);
+			if (await fs.readFile(notePath, "utf-8") === initialSource) await runJupytext(this.plugin.settings.toolingPython, ["--sync", ipynbPath]);
 		} catch (error) {
 			new Notice("Error executing notebook, check console for details");
 			console.error("Error executing notebook:", error);

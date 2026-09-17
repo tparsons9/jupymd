@@ -4,7 +4,7 @@
 	"version": "2.0.2",
 	"minAppVersion": "1.8.4",
 	"description": "Use Jupyter notebooks within your vault.",
-	"author": "Deniz Terzioglu",
-	"authorUrl": "https://d-eniz.github.io/",
+	"author": "Tanner Parsons",
+	"authorUrl": "https://tparsons9.github.io/",
 	"isDesktopOnly": true
 }

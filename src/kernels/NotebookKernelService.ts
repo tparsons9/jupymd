@@ -7,9 +7,14 @@ import {KernelConnection, KernelExecutionResult} from "./types";
 import {ManagedKernelSpecStore} from "./ManagedKernelSpecStore";
 import {parseNotebook} from "../components/types";
 
+import {ExecutionContexts} from "./ExecutionContexts";
+
 const execFileAsync = promisify(execFile);
 
 export class NotebookKernelService {
+ readonly contexts = new ExecutionContexts();
+ private queues = new Map<string, Promise<unknown>>();
+ private disposed = false;
 	constructor(
 		private readonly bridge: JupyterBridgeClient,
 		private readonly managedSpecs: ManagedKernelSpecStore
@@ -36,6 +41,7 @@ export class NotebookKernelService {
 	}
 
 	async setKernelForNote(notePath: string, kernel: KernelConnection): Promise<void> {
+  if (this.queues.has(notePath)) throw new Error('Interrupt the notebook and wait before changing its kernel.');
 		const ipynbPath = notePath.replace(/\.md$/, ".ipynb");
 		const notebook = parseNotebook(await fs.readFile(ipynbPath, "utf-8"));
 		notebook.metadata = notebook.metadata || {};
@@ -45,7 +51,7 @@ export class NotebookKernelService {
 			name: kernel.name,
 		};
 		await fs.writeFile(ipynbPath, JSON.stringify(notebook, null, 2), "utf-8");
-		await this.bridge.shutdown(notePath).catch(() => undefined);
+		await this.shutdown(notePath);
 	}
 
 	async preparePythonEnvironment(pythonPath: string, label?: string): Promise<KernelConnection> {
@@ -74,26 +80,45 @@ export class NotebookKernelService {
 	}
 
 	async execute(notePath: string, code: string): Promise<KernelExecutionResult> {
-		const kernel = await this.resolveKernelForNote(notePath);
-		if (!kernel) {
-			throw new Error("No usable Jupyter kernel is selected for this notebook.");
-		}
-		return this.bridge.execute(notePath, kernel.name, path.dirname(notePath), code);
-	}
+  const operation = (this.queues.get(notePath) || Promise.resolve()).catch(() => {}).then(async () => {
+   if (this.disposed) throw new Error('Notebook services are stopped.');
+   const kernel = await this.resolveKernelForNote(notePath);
+   if (!kernel) throw new Error('No usable Jupyter kernel is selected for this notebook.');
+   const cwd = await this.contexts.directory(notePath);
+   const previous = this.contexts.sessions.get(notePath);
+   if (previous && previous.cwd !== cwd) throw new Error('Startup directory changed. Restart this notebook kernel before running.');
+   const session = {notePath, kernel: kernel.name, cwd, status: 'busy' as const};
+   this.contexts.sessions.set(notePath, session); this.contexts.changed();
+   try {
+    const result = await this.bridge.execute(notePath, kernel.name, cwd, code);
+    this.contexts.sessions.set(notePath, {...session, status: 'idle'}); return result;
+   } catch (error) { this.contexts.sessions.set(notePath, {...session, status: 'error'}); throw error; }
+   finally { this.contexts.changed(); }
+  });
+  this.queues.set(notePath, operation);
+  try { return await operation; } finally { if (this.queues.get(notePath) === operation) this.queues.delete(notePath); }
+ }
 
 	async interrupt(notePath: string): Promise<boolean> {
 		return this.bridge.interrupt(notePath);
 	}
 
 	async restart(notePath: string): Promise<boolean> {
-		return this.bridge.restart(notePath);
+		if (this.queues.has(notePath)) throw new Error('Interrupt the notebook and wait for it to stop before restarting.');
+  const cwd = await this.contexts.directory(notePath);
+  const restarted = await this.bridge.restart(notePath, cwd);
+  const session = this.contexts.sessions.get(notePath);
+  if (session && restarted) this.contexts.sessions.set(notePath, {...session, cwd, status: 'idle'});
+  this.contexts.changed(); return restarted;
 	}
 
 	async shutdown(notePath: string): Promise<void> {
-		await this.bridge.shutdown(notePath);
+		if (this.queues.has(notePath)) throw new Error('Interrupt the notebook and wait for it to stop before shutting down.');
+  await this.bridge.shutdown(notePath);
+  this.contexts.sessions.delete(notePath); this.contexts.changed();
 	}
 
 	async dispose(): Promise<void> {
-		await this.bridge.dispose();
+		this.disposed = true; await this.bridge.dispose(); this.contexts.dispose();
 	}
 }

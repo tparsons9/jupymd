@@ -20,8 +20,13 @@ import {getExecutableCellIndex} from "./notebook/NotebookCellIndex";
 import {getKernelStatusLabel} from "./languages/KernelStatusLabel";
 import {rebuildWorkspaceLeaf} from "./utils/workspace";
 
+import {NotebookOperations} from "./notebook/NotebookOperations";
+import {NotebookApi} from "./api/NotebookApi";
+
 export default class JupyMDPlugin extends Plugin {
 	settings: JupyMDPluginSettings;
+ api: NotebookApi;
+ readonly operations = new NotebookOperations();
 	executor: CodeExecutor;
 	fileSync: FileSync;
 	kernelService: NotebookKernelService;
@@ -42,7 +47,9 @@ export default class JupyMDPlugin extends Plugin {
 		);
 		this.kernelService = new NotebookKernelService(this.bridge, this.managedKernelSpecs);
 		this.executor = new CodeExecutor(this, this.kernelService, this.app);
-		this.fileSync = new FileSync(this.app, this.settings.toolingPython);
+		this.fileSync = new FileSync(this.app, this.settings.toolingPython, () => this.settings.bidirectionalSync, this.operations);
+  this.api = new NotebookApi(this);
+  this.app.workspace.trigger("jupymd:api-ready");
 
 		this.kernelStatusBarItem = this.addStatusBarItem();
 		this.kernelStatusBarItem.addClass("kernel-status");
@@ -65,6 +72,8 @@ export default class JupyMDPlugin extends Plugin {
 	}
 
 	onunload(): void {
+  this.app.workspace.trigger("jupymd:api-unload");
+  this.fileSync.dispose();
 		void this.executor.cleanup();
 	}
 
@@ -85,7 +94,9 @@ export default class JupyMDPlugin extends Plugin {
 		this.settings.toolingPython = newPath;
 		await this.saveSettings();
 		await this.bridge.setToolingPython(newPath);
-		this.fileSync = new FileSync(this.app, newPath);
+  this.kernelService.contexts.sessions.clear(); this.kernelService.contexts.changed();
+		this.fileSync.dispose();
+  this.fileSync = new FileSync(this.app, newPath, () => this.settings.bidirectionalSync, this.operations);
 		this.kernelStatusLabels.clear();
 		void this.registerDiscoveredKernelLanguages();
 		new Notice(`Jupyter tooling environment set to: ${newPath}`);
