@@ -1,7 +1,5 @@
 name: Test JupyMD
 on:
-  push:
-  pull_request:
   workflow_dispatch:
   workflow_call:
 permissions:
@@ -11,24 +9,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   test:
-    name: ${{ matrix.os }} / Obsidian ${{ matrix.obsidian }}
+    name: macOS / Obsidian latest
     timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            obsidian: latest/latest
-          - os: windows-latest
-            obsidian: latest/latest
-          - os: macos-latest
-            obsidian: latest/latest
-          - os: ubuntu-latest
-            obsidian: 1.8.4/1.8.4
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,18 +33,9 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: .obsidian-cache
-          key: obsidian-${{ runner.os }}-${{ runner.arch }}-${{ matrix.obsidian }}-${{ hashFiles('package-lock.json') }}
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y xvfb openbox
+          key: obsidian-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
       - name: Obsidian acceptance tests
-        env:
-          OBSIDIAN_VERSIONS: ${{ matrix.obsidian }}
-        run: |
-          if [ "$RUNNER_OS" = 'Linux' ]; then
-            xvfb-run -a bash -c 'openbox >/dev/null 2>&1 & npm run test:e2e'
-          else
-            npm run test:e2e
-          fi
+        run: npm run test:e2e
       - name: Known sync regressions (diagnostic, expected failures)
         if: always()
         continue-on-error: true
@@ -70,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ strategy.job-index }}
+          name: test-results
           path: |
             test-results/
             .test-env/*-freeze.txt

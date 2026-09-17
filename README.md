@@ -113,8 +113,6 @@ JupyMD does not include telemetry and does not make its own network requests. If
 
 ## Contributing
 
-Please read the [contribution guidelines](https://github.com/d-eniz/jupymd/blob/master/CONTRIBUTING.md) if you want to contribute to JupyMD.
-
-This project was originally built to solve a personal problem, and it's still in an early stage. Feedback, feature requests, bug reports, and pull requests are all welcome and appreciated!
+This is a personal fork tailored to one workflow and isn't set up to take outside contributions; see [CONTRIBUTING.md](CONTRIBUTING.md) for how it's maintained. To contribute to JupyMD itself, please use the [upstream repository](https://github.com/d-eniz/jupymd) and its [contribution guidelines](https://github.com/d-eniz/jupymd/blob/master/CONTRIBUTING.md).
 
 JupyMD is an independent project and not affiliated with Project Jupyter, Jupytext, or Obsidian.

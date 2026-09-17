@@ -31,7 +31,7 @@ npm run test:unit -- --grep 'fragmented'
 npm run test:e2e -- --spec test/e2e/indexing.e2e.ts
 ```
 
-Desktop tests default to the latest Obsidian app and installer. CI tests latest on Linux, Windows and macOS, plus 1.8.4 on Linux. To check 1.8.4 locally:
+Desktop tests default to the latest Obsidian app and installer. CI runs on macOS against the latest Obsidian release only, before a release build; check other platforms or the minimum supported Obsidian version (1.8.4) locally as needed. To check 1.8.4 locally:
 
 ```sh
 OBSIDIAN_VERSIONS='1.8.4/1.8.4' npm run test:e2e
