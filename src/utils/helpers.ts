@@ -89,7 +89,7 @@ export async function installLibs(interpreter: string, libraries: string): Promi
 
 		if (stderr) {
 			new Notice("Warnings issued for installation, check console for details.");
-			console.error(stderr)
+			console.warn(stderr)
 		}
 		return true;
 	} catch (err) {

@@ -4,6 +4,7 @@ import {execFile} from "child_process";
 import {promisify} from "util";
 import {App, FileSystemAdapter, Platform} from "obsidian";
 import {validatePythonPath} from "./pythonPathUtils";
+import type {NotebookExecutionContext} from "../kernels/ExecutionContexts";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,7 +13,8 @@ export type PythonEnvironmentInfo = {
 	path: string;
 	version: string;
 	type: "venv" | "system";
-	source?: "pyenv";
+	source?: "pyenv" | "project";
+	unavailable?: boolean;
 };
 
 export function formatPythonEnvironmentLabel(label: string, version: string): string {
@@ -123,19 +125,18 @@ function isPyenvInterpreterCandidate(candidate: string, pyenvRoots: string[]): b
 	});
 }
 
-async function discoverVenvs(app: App): Promise<PythonEnvironmentInfo[]> {
-	const basePath = getVaultBasePath(app);
+async function discoverVenvs(basePath: string | null, source?: PythonEnvironmentInfo["source"]): Promise<PythonEnvironmentInfo[]> {
 	if (!basePath) return [];
 
 	const results: PythonEnvironmentInfo[] = [];
 	try {
 		for (const entry of fs.readdirSync(basePath, {withFileTypes: true})) {
-			if (!entry.isDirectory() || !entry.name.startsWith(".")) continue;
+			if (!entry.isDirectory() || (!source && !entry.name.startsWith("."))) continue;
 
 			const envDir = path.join(basePath, entry.name);
 			if (!fs.existsSync(path.join(envDir, "pyvenv.cfg"))) continue;
 
-			const result = await probeInterpreter(getVenvPythonPath(envDir), entry.name, "venv");
+			const result = await probeInterpreter(getVenvPythonPath(envDir), entry.name, "venv", source);
 			if (result) results.push(result);
 		}
 	} catch {
@@ -190,10 +191,29 @@ async function discoverGlobalInterpreters(): Promise<PythonEnvironmentInfo[]> {
 	return results;
 }
 
-export async function discoverPythonEnvironments(app: App): Promise<PythonEnvironmentInfo[]> {
-	const [venvs, globals] = await Promise.all([
-		discoverVenvs(app),
+export async function getProjectPythonEnvironment(context?: NotebookExecutionContext): Promise<PythonEnvironmentInfo | null> {
+	const environment = context?.environment;
+	if (!environment || environment.language.toLowerCase() !== "python") return null;
+	const label = environment.label ? `Project environment: ${environment.label}` : "Project environment";
+	const executableDir = path.dirname(environment.executable);
+	const type = fs.existsSync(path.join(path.dirname(executableDir), "pyvenv.cfg")) ? "venv" : "system";
+	const result = await probeInterpreter(environment.executable, label, type, "project");
+	// Keep a missing configured interpreter visible so a global fallback is never mistaken for it.
+	return result ?? {label, path: environment.executable, version: "Unavailable", type, source: "project", unavailable: true};
+}
+
+export async function discoverPythonEnvironments(app: App, context?: NotebookExecutionContext): Promise<PythonEnvironmentInfo[]> {
+	const [preferred, projectVenvs, venvs, globals] = await Promise.all([
+		getProjectPythonEnvironment(context),
+		context?.projectRoot ? discoverVenvs(context.projectRoot, "project") : Promise.resolve([]),
+		discoverVenvs(getVaultBasePath(app)),
 		discoverGlobalInterpreters(),
 	]);
-	return [...venvs, ...globals];
+	const seen = new Set<string>();
+	return [...(preferred ? [preferred] : []), ...projectVenvs, ...venvs, ...globals].filter(environment => {
+		const key = Platform.isWin ? environment.path.toLowerCase() : environment.path;
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return true;
+	});
 }

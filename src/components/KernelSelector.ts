@@ -2,10 +2,11 @@ import {App, FuzzySuggestModal, FuzzyMatch, Modal, Notice, Setting} from "obsidi
 import {execFile} from "child_process";
 import {promisify} from "util";
 import * as path from "path";
-import JupyMDPlugin from "../main";
+import type JupyMDPlugin from "../main";
 import {CreateVenvModal} from "./CreateVenvModal";
 import {
 	discoverPythonEnvironments,
+	getProjectPythonEnvironment,
 	PythonEnvironmentInfo,
 } from "../utils/pythonEnvironmentDiscovery";
 import {validatePythonPath} from "../utils/pythonPathUtils";
@@ -13,6 +14,7 @@ import {runQuickSetup} from "../utils/quickSetup";
 import {getErrorMessage, installLibs} from "../utils/helpers";
 import {KernelConnection} from "../kernels/types";
 import {languageSupportRegistry} from "../languages/LanguageSupport";
+import type {NotebookExecutionContext} from "../kernels/ExecutionContexts";
 
 const execFileAsync = promisify(execFile);
 const TOOLING_PACKAGES = "jupytext jupyter_client";
@@ -36,7 +38,7 @@ type CreateVenvOption = {
 type PythonEnvironmentOption = PythonEnvironmentInfo | CustomPathOption | CreateVenvOption;
 
 type KernelSourceOption = {
-	id: "jupyter-kernels" | "python-environments";
+	id: "jupyter-kernels" | "python-environments" | "project-environment";
 	displayName: string;
 	description: string;
 };
@@ -137,7 +139,8 @@ export class PythonEnvironmentSelectorModal extends FuzzySuggestModal<PythonEnvi
 	constructor(
 		app: App,
 		private initialPythonPath: string,
-		private createEnvironmentPackages = "ipykernel"
+		private createEnvironmentPackages = "ipykernel",
+		private context?: NotebookExecutionContext
 	) {
 		super(app);
 		this.setPlaceholder("Select a Python environment or type a custom path…");
@@ -198,7 +201,9 @@ export class PythonEnvironmentSelectorModal extends FuzzySuggestModal<PythonEnvi
 					...suggestions.filter((suggestion) => suggestion.item.path !== initial.path),
 				]
 				: suggestions;
-			return [createSuggestion, ...ordered];
+			return this.context?.environment?.language.toLowerCase() === "python"
+				? [...ordered, createSuggestion]
+				: [createSuggestion, ...ordered];
 		}
 
 		const exact = this.environments.some((environment) => environment.path.toLowerCase() === typed.toLowerCase());
@@ -230,7 +235,9 @@ export class PythonEnvironmentSelectorModal extends FuzzySuggestModal<PythonEnvi
 			? {cls: "kernel-badge-create", text: "recommended"}
 			: isCustomPathOption(item)
 				? {cls: "kernel-badge-custom", text: "custom"}
-				: item.source === "pyenv"
+				: item.source === "project"
+					? {cls: "kernel-badge-system", text: item.unavailable ? "unavailable" : "project"}
+					: item.source === "pyenv"
 					? {cls: "kernel-badge-pyenv", text: "pyenv"}
 					: {cls: `kernel-badge-${item.type}`, text: item.type};
 
@@ -263,7 +270,7 @@ export class PythonEnvironmentSelectorModal extends FuzzySuggestModal<PythonEnvi
 					);
 				}
 			} else {
-				if (isCustomPathOption(item) && !await validatePythonPath(item.path)) {
+				if (!await validatePythonPath(item.path)) {
 					new Notice(`Invalid Python path: ${item.path}`);
 				} else {
 					selectedPath = item.path;
@@ -287,7 +294,7 @@ export class PythonEnvironmentSelectorModal extends FuzzySuggestModal<PythonEnvi
 
 	private async loadEnvironments() {
 		try {
-			this.environments = await discoverPythonEnvironments(this.app);
+			this.environments = await discoverPythonEnvironments(this.app, this.context);
 		} catch (error) {
 			console.error("Python environment discovery failed:", error);
 			this.environments = [];
@@ -459,12 +466,17 @@ export class NotebookKernelSelectorModal extends FuzzySuggestModal<KernelSourceO
 	private resolver: ((kernel: KernelConnection | null) => void) | null = null;
 	private resolved = false;
 	private isChoosing = false;
+	private sources = [...KERNEL_SOURCES];
+	private projectEnvironment: PythonEnvironmentInfo | null = null;
+	private closed = false;
 
 	constructor(
 		app: App,
 		private plugin: JupyMDPlugin,
 		private currentKernelName?: string,
-		private preferredLanguage?: string
+		private preferredLanguage?: string,
+		private notePath?: string,
+		private context?: NotebookExecutionContext
 	) {
 		super(app);
 		this.setPlaceholder("Select a kernel source…");
@@ -482,7 +494,41 @@ export class NotebookKernelSelectorModal extends FuzzySuggestModal<KernelSourceO
 		});
 	}
 
+	async onOpen(): Promise<void> {
+		this.closed = false;
+		await super.onOpen();
+		// Recommendation failures must not prevent selection of a valid existing kernel.
+		let diagnostic = this.modalEl.querySelector<HTMLElement>('.kernel-environment-diagnostic');
+		if (this.context?.environmentError) {
+			if (!diagnostic) diagnostic = this.modalEl.createDiv({cls: 'kernel-environment-diagnostic'});
+			diagnostic.setAttribute('role', 'status');
+			diagnostic.setText(`Project environment recommendation unavailable: ${this.context.environmentError}`);
+		} else diagnostic?.remove();
+		const environment = await getProjectPythonEnvironment(this.context);
+		if (this.closed) return;
+		this.projectEnvironment = environment;
+		this.sources = environment ? [{
+			id: "project-environment",
+			displayName: environment.label,
+			description: `${environment.unavailable ? "Unavailable" : "Recommended"}: ${environment.path}`,
+		}, ...KERNEL_SOURCES] : [...KERNEL_SOURCES];
+		// @ts-ignore - internal Obsidian API
+		this.updateSuggestions();
+		if (environment && this.currentKernelName && this.notePath) {
+			const kernel = await this.plugin.kernelService.resolveKernelForNote(this.notePath).catch(() => null);
+			if (this.closed) return;
+			const sameInterpreter = kernel?.interpreterPath &&
+				path.normalize(kernel.interpreterPath) === path.normalize(environment.path);
+			const mismatch = kernel && (kernel.interpreterPath || kernel.language.toLowerCase() !== "python");
+			const state = sameInterpreter ? "Current kernel" : mismatch ? "Different from current kernel" : `Current kernel: ${this.currentKernelName}`;
+			this.sources[0].description += ` · ${state}`;
+			// @ts-ignore - internal Obsidian API
+			this.updateSuggestions();
+		}
+	}
+
 	onClose() {
+		this.closed = true;
 		super.onClose();
 		if (this.isChoosing) return;
 		if (!this.resolved) this.resolver?.(null);
@@ -496,7 +542,7 @@ export class NotebookKernelSelectorModal extends FuzzySuggestModal<KernelSourceO
 	}
 
 	getItems(): KernelSourceOption[] {
-		return KERNEL_SOURCES;
+		return this.sources;
 	}
 
 	getItemText(item: KernelSourceOption): string {
@@ -519,7 +565,9 @@ export class NotebookKernelSelectorModal extends FuzzySuggestModal<KernelSourceO
 	private async chooseItem(item: KernelSourceOption): Promise<void> {
 		let selectedKernel: KernelConnection | null = null;
 		try {
-			selectedKernel = item.id === "jupyter-kernels"
+			selectedKernel = item.id === "project-environment"
+				? this.projectEnvironment ? await this.preparePythonEnvironmentKernel(this.projectEnvironment.path) : null
+				: item.id === "jupyter-kernels"
 				? await new JupyterKernelSelectorModal(
 					this.app,
 					this.plugin,
@@ -528,8 +576,8 @@ export class NotebookKernelSelectorModal extends FuzzySuggestModal<KernelSourceO
 				).openAndGetValue()
 				: await this.selectPythonEnvironmentKernel();
 		} catch (error) {
-			console.error("Failed to prepare notebook kernel:", error);
 			if (getErrorMessage(error) !== "IPyKernel installation was cancelled.") {
+				console.error("Failed to prepare notebook kernel:", error);
 				new Notice("Failed to prepare notebook kernel. Check the console for details.");
 			}
 		}
@@ -549,15 +597,23 @@ export class NotebookKernelSelectorModal extends FuzzySuggestModal<KernelSourceO
 	private async selectPythonEnvironmentKernel(): Promise<KernelConnection | null> {
 		const pythonPath = await new PythonEnvironmentSelectorModal(
 			this.app,
-			this.plugin.settings.toolingPython
+			this.context?.environment?.language.toLowerCase() === "python" ? this.context.environment.executable : this.plugin.settings.toolingPython,
+			"ipykernel",
+			this.context
 		).openAndGetValue();
 		if (!pythonPath) return null;
+		return this.preparePythonEnvironmentKernel(pythonPath);
+	}
 
+	private async preparePythonEnvironmentKernel(pythonPath: string): Promise<KernelConnection> {
+		if (!await validatePythonPath(pythonPath)) {
+			throw new Error(`Python environment is unavailable: ${pythonPath}`);
+		}
 		if (!await this.hasIPyKernel(pythonPath)) {
 			const install = await new ConfirmModal(
 				this.app,
 				"Install IPyKernel",
-				"This Python environment needs IPyKernel to run as a Jupyter kernel.",
+				`This Python environment needs IPyKernel to run as a Jupyter kernel. Install it into ${pythonPath}?`,
 				"Install"
 			).openAndGetValue();
 			if (!install) throw new Error("IPyKernel installation was cancelled.");

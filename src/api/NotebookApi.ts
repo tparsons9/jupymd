@@ -3,27 +3,37 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import type JupyMDPlugin from '../main';
 import type {KernelConnection} from '../kernels/types';
-import type {ExecutionContextResolver} from '../kernels/ExecutionContexts';
+import type {ExecutionContextResolver, NotebookExecutionContext} from '../kernels/ExecutionContexts';
 import {getExecutableCellIndex, getExecutableCellIndices, parseMarkdownCodeFences} from '../notebook/NotebookCellIndex';
 import {isCodeCell, OUTPUTS_UPDATED_EVENT, parseNotebook} from '../components/types';
 import {runJupytext} from '../utils/helpers';
 export type NotebookAction = 'run' | 'all' | 'above' | 'below' | 'interrupt' | 'restart' | 'shutdown' | 'clear';
+export type KernelPickerOptions = {preferredLanguage?: string; context?: NotebookExecutionContext};
 /** Versioned, explicitly targeted API. No operation depends on the active leaf. */
 export class NotebookApi {
  readonly apiVersion = 1;
+ readonly capabilities = {projectEnvironments: true, kernelPicker: true} as const;
  constructor(private plugin: JupyMDPlugin) {}
  registerExecutionContextResolver(owner: string, resolver: ExecutionContextResolver) { return this.plugin.kernelService.contexts.register(owner, resolver); }
  subscribe(listener: () => void) { return this.plugin.kernelService.contexts.subscribe(listener); }
  getSessions() { return this.plugin.kernelService.contexts.list(); }
  listKernels() { return this.plugin.kernelService.listKernels(); }
- private file(notePath: string): TFile {
+ private relativePath(notePath: string): string {
   const adapter = this.plugin.app.vault.adapter;
   if (!(adapter instanceof FileSystemAdapter)) throw new Error('A local vault is required.');
+  if (!path.isAbsolute(notePath) || path.extname(notePath) !== '.md') throw new Error('Notebook must be an absolute Markdown path.');
   const relative = path.relative(adapter.getBasePath(), notePath);
   if (relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) throw new Error('Notebook must be inside the vault.');
-  const file = this.plugin.app.vault.getAbstractFileByPath(relative.split(path.sep).join('/'));
+  return relative.split(path.sep).join('/');
+ }
+ private file(notePath: string): TFile {
+  const file = this.plugin.app.vault.getAbstractFileByPath(this.relativePath(notePath));
   if (!(file instanceof TFile) || file.extension !== 'md') throw new Error('Notebook note is unavailable.');
   return file;
+ }
+ async pickKernel(notePath: string, options?: KernelPickerOptions): Promise<KernelConnection | null> {
+  this.relativePath(notePath);
+  return this.plugin.pickKernelForNote(notePath, options);
  }
  async pair(notePath: string, kernel: KernelConnection): Promise<void> {
   const file = this.file(notePath);

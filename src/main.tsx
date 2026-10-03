@@ -21,7 +21,7 @@ import {getKernelStatusLabel} from "./languages/KernelStatusLabel";
 import {rebuildWorkspaceLeaf} from "./utils/workspace";
 
 import {NotebookOperations} from "./notebook/NotebookOperations";
-import {NotebookApi} from "./api/NotebookApi";
+import {NotebookApi, type KernelPickerOptions} from "./api/NotebookApi";
 
 export default class JupyMDPlugin extends Plugin {
 	settings: JupyMDPluginSettings;
@@ -114,10 +114,10 @@ export default class JupyMDPlugin extends Plugin {
 			return true;
 		}
 
-		const kernel = await new NotebookKernelSelectorModal(this.app, this, undefined, preferredLanguage).openAndGetValue();
+		const kernel = await this.pickKernelForNote(getAbsolutePath(activeFile), {preferredLanguage});
 		if (!kernel) return false;
 		if (this.settings.enableCodeBlocks) this.registerNotebookCodeBlockProcessor(kernel.language);
-		const created = await this.fileSync.createNotebook(kernel, refreshView);
+		const created = await this.fileSync.createNotebook(kernel, refreshView, activeFile);
 		if (created) await this.updateStatusBar();
 		return created;
 	}
@@ -131,6 +131,26 @@ export default class JupyMDPlugin extends Plugin {
 		}
 
 		return this.selectKernelForNote(notePath);
+	}
+
+	async pickKernelForNote(notePath: string, options: KernelPickerOptions = {}): Promise<KernelConnection | null> {
+		const contexts = this.kernelService.contexts;
+		const resolve = () => options.context ? contexts.validate(options.context) : contexts.resolve(notePath);
+		const context = await resolve();
+		let currentName: string | undefined;
+		try {
+			currentName = parseNotebook(fs.readFileSync(notePath.replace(/\.md$/, ".ipynb"), "utf-8"))?.metadata?.kernelspec?.name;
+		} catch {
+			// New or malformed notebooks can still select a kernel.
+		}
+		const selected = await new NotebookKernelSelectorModal(
+			this.app, this, currentName, options.preferredLanguage, notePath, context
+		).openAndGetValue();
+		if (!selected) return null;
+		if (JSON.stringify(context) !== JSON.stringify(await resolve())) {
+			throw new Error("The notebook project or environment changed. Select its kernel again.");
+		}
+		return selected;
 	}
 
 	async selectKernelForNote(notePath?: string): Promise<KernelConnection | null> {
@@ -147,15 +167,7 @@ export default class JupyMDPlugin extends Plugin {
 			return null;
 		}
 
-		let currentName: string | undefined;
-		try {
-			const notebook = parseNotebook(fs.readFileSync(ipynbPath, "utf-8"));
-			currentName = notebook?.metadata?.kernelspec?.name;
-		} catch {
-			// The selector can still offer recovery for malformed/missing metadata.
-		}
-
-		const selected = await new NotebookKernelSelectorModal(this.app, this, currentName).openAndGetValue();
+		const selected = await this.pickKernelForNote(targetPath);
 		if (!selected) return null;
 
 		await this.kernelService.setKernelForNote(targetPath, selected);
